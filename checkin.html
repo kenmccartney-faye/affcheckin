@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title></title>
+<style>
+  :root {
+    --accent: #2563eb;
+    --accent-dark: #1d4ed8;
+    --error: #dc2626;
+    --success: #16a34a;
+    --bg: #f3f4f6;
+    --card-bg: #ffffff;
+    --text: #111827;
+    --muted: #6b7280;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text);
+    padding: 24px;
+  }
+  .card {
+    background: var(--card-bg);
+    border-radius: 16px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+    padding: 32px 28px;
+    max-width: 380px;
+    width: 100%;
+    text-align: center;
+  }
+  h1 {
+    font-size: 1.3rem;
+    margin: 0 0 8px;
+  }
+  .meta {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-bottom: 24px;
+    word-break: break-all;
+  }
+  .meta span {
+    font-weight: 600;
+    color: var(--text);
+  }
+  #checkin-btn {
+    width: 100%;
+    padding: 16px;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #fff;
+    background: var(--accent);
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.05s ease;
+  }
+  #checkin-btn:hover:not(:disabled) { background: var(--accent-dark); }
+  #checkin-btn:active:not(:disabled) { transform: scale(0.98); }
+  #checkin-btn:disabled {
+    background: #9ca3af;
+    cursor: not-allowed;
+  }
+  #status {
+    margin-top: 18px;
+    font-size: 0.9rem;
+    min-height: 1.2em;
+  }
+  #status.error { color: var(--error); }
+  #status.success { color: var(--success); }
+  #status.pending { color: var(--muted); }
+  .warning {
+    background: #fef2f2;
+    color: var(--error);
+    border: 1px solid #fecaca;
+    border-radius: 10px;
+    padding: 14px;
+    font-size: 0.9rem;
+  }
+  .coords {
+    margin-top: 10px;
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div id="content"></div>
+  </div>
+
+<script>
+(function () {
+  var checkin_api = "https://affdev.sugarondemand.com";//testing
+  //var checkin_api = "https://aff.sugarondemand.com";//production
+  var content = document.getElementById('content');
+
+  // Accessing window.top throws for some cross-origin frames, which still means we're framed.
+  var IN_IFRAME = (function () {
+    try { return window.self !== window.top; } catch (e) { return true; }
+  })();
+
+  // Cross-origin iframes only get geolocation if the host's <iframe> has allow="geolocation".
+  function frameAllowsGeolocation() {
+    var policy = document.permissionsPolicy || document.featurePolicy;
+    if (policy && typeof policy.allowsFeature === 'function') {
+      return policy.allowsFeature('geolocation');
+    }
+    return true; // Can't tell in this browser; let getCurrentPosition() decide.
+  }
+
+  function readParams(search) {
+    var p = new URLSearchParams(search || '');
+    return { id: (p.get('id') || '').trim(), userid: (p.get('userid') || '').trim() };
+  }
+
+  function hasParams(p) {
+    return p.id !== '' && p.userid !== '';
+  }
+
+  function showMissingParams() {
+    content.innerHTML =
+      '<div class="warning">' +
+        'Missing required URL parameters. This page needs both ' +
+        '<code>id</code> and <code>userid</code>' +
+      '</div>';
+  }
+
+  // Look for id/userid on this page's URL first, then on the parent page's URL.
+  var params = readParams(window.location.search);
+
+  if (!hasParams(params) && IN_IFRAME) {
+    // Same-origin parent: read its URL directly (throws if cross-origin).
+    try {
+      params = readParams(window.parent.location.search);
+    } catch (e) {}
+  }
+
+  if (!hasParams(params) && IN_IFRAME && document.referrer) {
+    // Cross-origin parent: the referrer is the parent URL, though browsers usually strip its query.
+    try {
+      params = readParams(new URL(document.referrer).search);
+    } catch (e) {}
+  }
+
+  if (!hasParams(params) && IN_IFRAME) {
+    // Last resort: ask the parent to send its query string (it needs the 'checkin:getParams'
+    // listener), then reload this frame with those params on its own URL.
+    window.addEventListener('message', function (e) {
+      if (e.source !== window.parent || !e.data || e.data.type !== 'checkin:params') {
+        return;
+      }
+      var received = readParams(e.data.search);
+      if (hasParams(received)) {
+        var url = new URL(window.location.href);
+        url.searchParams.set('id', received.id);
+        url.searchParams.set('userid', received.userid);
+        window.location.replace(url.toString());
+      }
+    });
+    window.parent.postMessage({ type: 'checkin:getParams' }, '*');
+    content.textContent = 'Loading…';
+    setTimeout(showMissingParams, 3000);
+    return;
+  }
+
+  if (!hasParams(params)) {
+    showMissingParams();
+    return;
+  }
+
+  var RECORD_ID = params.id;
+  var USER_ID   = params.userid;
+
+  content.innerHTML =
+    '<button id="checkin-btn" type="button">Check In</button>' +
+    '<div id="status"></div>' +
+    '<div id="coords" class="coords"></div>' +
+    '<div id="meeting-link" class="coords"></div>';
+
+  var checkinBasePath = window.location.pathname.replace(/\/custom\/include\/checkin\/checkin\.html$/, '');
+  //var CHECKIN_ENDPOINT_URL = window.location.origin + checkinBasePath + '/rest/v11/Accounts/checkin';
+  var CHECKIN_ENDPOINT_URL = checkin_api + '/rest/v11/Accounts/checkin';
+
+  var btn           = document.getElementById('checkin-btn');
+  var statusEl      = document.getElementById('status');
+  var coordsEl      = document.getElementById('coords');
+  var meetingLinkEl = document.getElementById('meeting-link');
+
+  function decodeHtmlEntities(text) {
+    var ta = document.createElement('textarea');
+    ta.innerHTML = text;
+    return ta.value;
+  }
+
+  // The API sometimes returns a full "<a href=...>Label</a>" snippet instead
+  // of a bare URL, so pull the href/label out of it if present.
+  function extractMeetingLink(raw) {
+    if (typeof raw !== 'string' || raw === '') {
+      return null;
+    }
+    var match = raw.match(/<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i);
+    if (match) {
+      var label = decodeHtmlEntities(match[2]).trim();
+      return { href: decodeHtmlEntities(match[1]), label: label || 'Meeting Link' };
+    }
+    return { href: raw, label: 'Meeting Link' };
+  }
+
+  function showMeetingLink(rawUrl) {
+    meetingLinkEl.textContent = '';
+    var info = extractMeetingLink(rawUrl);
+    if (!info) {
+      return;
+    }
+    try {
+      var parsed = new URL(info.href, window.location.href);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return;
+      }
+    } catch (e) {
+      return;
+    }
+    var link = document.createElement('a');
+    link.href = info.href;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = info.label;
+    meetingLinkEl.appendChild(link);
+  }
+
+  function setStatus(message, kind) {
+    statusEl.textContent = message;
+    statusEl.className = kind || '';
+  }
+
+  function setButtonEnabled(enabled) {
+    btn.disabled = !enabled;
+  }
+
+  // Fallback when the embedding page blocks location: run the check-in top-level instead.
+  function showOpenInNewTab() {
+    coordsEl.textContent = '';
+    var link = document.createElement('a');
+    link.href = window.location.href;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'Open check-in in a new tab';
+    coordsEl.appendChild(link);
+  }
+
+  // Check the current geolocation permission state (if the browser supports
+  // the Permissions API) so we can inform the user before they click.
+  // This does NOT itself trigger the browser's permission prompt - that
+  // still only happens when getCurrentPosition() is called on click.
+  if (navigator.permissions && navigator.permissions.query) {
+    navigator.permissions.query({ name: 'geolocation' }).then(function (result) {
+      function reflectState() {
+        if (result.state === 'denied') {
+          setStatus('Location access is blocked. Please enable it in your browser settings and try again.', 'error');
+        } else if (result.state === 'granted') {
+          setStatus('Location access already granted.', 'success');
+        } else {
+          setStatus('This page will ask for your location when you check in.', 'pending');
+        }
+      }
+      reflectState();
+      result.onchange = reflectState;
+    }).catch(function () {
+      // Permissions API not supported for 'geolocation' in this browser - ignore.
+    });
+  }
+
+  btn.addEventListener('click', function () {
+    coordsEl.textContent = '';
+
+    if (!('geolocation' in navigator)) {
+      setStatus('Geolocation is not supported by this browser.', 'error');
+      return;
+    }
+
+    if (IN_IFRAME && !frameAllowsGeolocation()) {
+      setStatus('Location access is not allowed in this embedded view.', 'error');
+      showOpenInNewTab();
+      return;
+    }
+
+    setButtonEnabled(false);
+    setStatus('Getting your location…', 'pending');
+
+    navigator.geolocation.getCurrentPosition(
+      function (position) {
+        var lat  = position.coords.latitude;
+        var long = position.coords.longitude;
+
+        setStatus('Submitting check-in…', 'pending');
+
+        var payload = {
+          id: RECORD_ID,
+          userid: USER_ID,
+          lat: lat,
+          long: long
+        };
+
+        // text/plain (not application/json) keeps this a CORS "simple" request,
+        // so the browser skips the OPTIONS preflight when this page is hosted
+        // outside Sugar. The body is still JSON; CheckInApi.php decodes it.
+        fetch(CHECKIN_ENDPOINT_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+          body: JSON.stringify(payload)
+        })
+          .then(function (response) {
+            return response.json().then(function (data) {
+              return { ok: response.ok, data: data };
+            });
+          })
+          .then(function (result) {
+            var res = result.data;
+            console.log(res);
+
+            if (result.ok && res.success) {
+              setStatus('Checked in successfully.', 'success');
+              showMeetingLink(res.meeting_url);
+            } else {
+              var errMsg = res && res.message ? JSON.stringify(res.message) : 'Check-in failed.';
+              setStatus(errMsg, 'error');
+              showMeetingLink(null);
+            }
+            setButtonEnabled(true);
+          })
+          .catch(function (err) {
+            setStatus('Network error submitting check-in: ' + err.message, 'error');
+            setButtonEnabled(true);
+          });
+      },
+      function (error) {
+        var msg = 'Unable to get location.';
+        switch (error.code) {
+          case error.PERMISSION_DENIED:
+            msg = 'Location permission denied. Please allow location access and try again.';
+            break;
+          case error.POSITION_UNAVAILABLE:
+            msg = 'Location information is unavailable.';
+            break;
+          case error.TIMEOUT:
+            msg = 'Timed out getting location. Please try again.';
+            break;
+        }
+        setStatus(msg, 'error');
+        if (IN_IFRAME && error.code === error.PERMISSION_DENIED) {
+          showOpenInNewTab();
+        }
+        setButtonEnabled(true);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 0
+      }
+    );
+  });
+})();
+</script>
+</body>
+</html>
